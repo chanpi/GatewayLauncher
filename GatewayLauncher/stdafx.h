@@ -28,6 +28,7 @@ typedef std::basic_string<TCHAR> tstring;
 
 // TODO: プログラムに必要な追加ヘッダーをここで参照してください。
 
-#include "AnalyzeXML.h"
-#include "Miscellaneous.h"
-#include "ErrorCodeList.h"
+#include "Misc.h"
+#include "SharedConstants.h"
+#include "I4C3DCommon.h"
+

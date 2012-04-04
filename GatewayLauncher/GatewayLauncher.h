@@ -8,9 +8,10 @@
 #define BUFFER_SIZE			256
 #define MAX_TARGET_COUNT	20
 
-#define MY_LAUNCHFAILED	(WM_APP+2)
-
 class AnalyzeXML;
+
+#define MY_NOTIFYICON		(WM_APP+1)
+#define MY_LAUNCHFAILED		(WM_APP+2)
 
 typedef struct GatewayLauncherContext {
 	AnalyzeXML* pAnalyzer;

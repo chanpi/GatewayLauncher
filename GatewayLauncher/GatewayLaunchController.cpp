@@ -1,12 +1,22 @@
 #include "stdafx.h"
 #include "GatewayLauncher.h"
 #include "GatewayLaunchController.h"
+#include "AnalyzeXML.h"
 #include "resource.h"
-#include "Miscellaneous.h"
+
 #include <map>
 using namespace std;
 
+#if UNICODE || _UNICODE
+static LPCTSTR g_FILE = __FILEW__;
+#else
+static LPCTSTR g_FILE = __FILE__;
+#endif
+
 static VOID CreateErrorMessageMap(VOID);
+static VOID CloseProcess(LPCTSTR szApplicationName, HANDLE hProcess, DWORD dwProcessId);
+static VOID GetFileNameWithNoExtension(LPCTSTR szAppTitleWithExtension, LPTSTR szAppTitle, int length);
+
 // アプリケーションの起動に関する関数（ランチャー）
 unsigned int __stdcall LaunchApplicationsProc(void *pParam);
 unsigned int __stdcall LaunchProgramThreadProc(void *pParam);
@@ -18,9 +28,11 @@ namespace {
 	static int g_nTimeToWait = 1000;
 	// エラーメッセージマップ
 	static map<int, tstring> g_ErrorMessageMap;
-};
 
-extern LPCTSTR g_szConfigurationFileName;
+	const PCTSTR TAG_TIME_TO_WAIT	= _T("time_to_wait");
+	const tstring CRNL				= _T("\r\n");
+	const UINT g_uErrorDialogType = MB_OK | MB_ICONERROR | MB_TOPMOST;
+};
 
 extern TCHAR szTitle[];					// タイトル バーのテキスト
 
@@ -36,27 +48,33 @@ extern HWND g_hWnd;
 extern HWND g_hDlg;
 // ログダイアログに表示するテキスト
 extern tstring g_statusString;
-// プログラム起動に失敗したか
-extern volatile BOOL g_bLaunchFailed;
 
 extern HANDLE g_hLauchApplicationThread;
 
 BOOL Initialize(HWND hWnd)
 {
+	// エラーメッセージをStringTableから取得
+	CreateErrorMessageMap();
+
 	// stopイベントの作成
 	g_hStopEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
 	if (g_hStopEvent == INVALID_HANDLE_VALUE) {
-		LogDebugMessage(Log_Error, _T("終了イベントの作成に失敗しました。プログラムを終了します。"));
-		MessageBox(hWnd, _T("終了イベントの作成に失敗しました。プログラムを終了します。"), szTitle, MB_OK | MB_ICONERROR | MB_TOPMOST);
+		LoggingMessage(Log_Error, _T(MESSAGE_ERROR_HANDLE_INVALID), GetLastError(), g_FILE, __LINE__);
+		MessageBox(hWnd, g_ErrorMessageMap[EXIT_FAILURE].c_str(), szTitle, g_uErrorDialogType);
 		PostMessage(hWnd, WM_CLOSE, 0, 0);
 		return FALSE;
 	}
 
 	// 設定ファイル解析クラスを初期化
-	if (!g_analyzer.LoadXML(g_szConfigurationFileName)) {
-		//ReportError(_T("[ERROR] XMLのロードに失敗しています。プログラムを終了します。"));
-		LogDebugMessage(Log_Error, _T("XMLのロードに失敗しています。プログラムを終了します。"));
-		MessageBox(hWnd, _T("XMLのロードに失敗しています。プログラムを終了します。"), szTitle, MB_OK | MB_ICONERROR | MB_TOPMOST);
+	BOOL bFileExist = TRUE;
+	if (!g_analyzer.LoadXML(SHARED_XML_FILE, &bFileExist)) {
+		if (bFileExist) {
+			LoggingMessage(Log_Error, g_ErrorMessageMap[EXIT_INVALID_FILE_CONFIGURATION].c_str(), GetLastError(), __FILEW__, __LINE__);
+			MessageBox(hWnd, g_ErrorMessageMap[EXIT_INVALID_FILE_CONFIGURATION].c_str(), szTitle, g_uErrorDialogType);
+		} else {
+			LoggingMessage(Log_Error, _T(MESSAGE_ERROR_XML_LOAD), GetLastError(), __FILEW__, __LINE__);
+			MessageBox(hWnd, g_ErrorMessageMap[EXIT_FILE_NOT_FOUND].c_str(), szTitle, g_uErrorDialogType);
+		}
 		PostMessage(hWnd, WM_CLOSE, 0, 0);
 		return FALSE;
 	}
@@ -134,18 +152,83 @@ VOID CreateErrorMessageMap(VOID)
 	LoadString(hInst, IDS_EXIT_GAMEPAD_SETUP_ERROR, szMessage, _countof(szMessage));
 	g_ErrorMessageMap[EXIT_GAMEPAD_SETUP_ERROR] = szMessage;
 
-	LoadString(hInst, IDS_EXIT_RTT4EC_CONNECT_ERROR, szMessage, _countof(szMessage));
-	g_ErrorMessageMap[EXIT_RTT4EC_CONNECT_ERROR] = szMessage;
+	LoadString(hInst, IDS_EXIT_RTTEC_CONNECT_ERROR, szMessage, _countof(szMessage));
+	g_ErrorMessageMap[EXIT_RTTEC_CONNECT_ERROR] = szMessage;
+	
+	LoadString(hInst, IDS_EXIT_CORE_CONNECT_ERROR, szMessage, _countof(szMessage));
+	g_ErrorMessageMap[EXIT_CORE_CONNECT_ERROR] = szMessage;
 
+	LoadString(hInst, IDS_EXIT_NOT_EXECUTABLE, szMessage, _countof(szMessage));
+	g_ErrorMessageMap[EXIT_NOT_EXECUTABLE] = szMessage;
 	LoadString(hInst, IDS_EXIT_SOME_ERROR, szMessage, _countof(szMessage));
 	g_ErrorMessageMap[EXIT_SOME_ERROR] = szMessage;
 }
 
+VOID CloseProcess(LPCTSTR szApplicationName, HANDLE hProcess, DWORD dwProcessId)
+{
+	LPCTSTR szAppTitleWithExtension = PathFindFileName(szApplicationName);
+	TCHAR szAppTitle[MAX_PATH] = {0};
+	DWORD dwExitCode;
+	GetFileNameWithNoExtension(szAppTitleWithExtension, szAppTitle, _countof(szAppTitle));
+	// HWNDを取得できるならWM_CLOSEメッセージを送信
+	if (szAppTitleWithExtension) {
+		HWND hWnd = FindWindow(szAppTitle, NULL);
+		if (hWnd) {
+			PostMessage(hWnd, WM_CLOSE, 0, 0);
+		}
+	}
+
+	// プロセス情報が与えられていれば、プロセスが終了しているか確認
+	if (hProcess != NULL && hProcess != INVALID_HANDLE_VALUE) {
+		GetExitCodeProcess(hProcess, &dwExitCode);
+		if (dwExitCode != STILL_ACTIVE) {
+			return;
+		}
+	}
+
+	// taskkillを試す
+	for (int i = 0; i < 5; i++) {
+		ShellExecute(NULL, _T("open"), _T("taskkill"), tstring(_T("/IM ")).append(szAppTitleWithExtension).c_str(), NULL, SW_HIDE);
+	}
+
+	// プロセス情報が与えられていれば、プロセスが終了しているか確認
+	if (hProcess != NULL && hProcess != INVALID_HANDLE_VALUE) {
+		GetExitCodeProcess(hProcess, &dwExitCode);
+		if (dwExitCode != STILL_ACTIVE) {
+			return;
+		}
+	}
+
+	// プロセスIDが与えられているならtaskkill pid xxxx、与えられていなければTerminatePorcess
+	if (dwProcessId > 0) {
+		TCHAR szPID[8];
+		_stprintf_s(szPID, _countof(szPID), _T("%d"), dwProcessId);
+		for (int i = 0; i < 5; i++) {
+			ShellExecute(NULL, _T("open"), _T("taskkill"), tstring(_T("/pid ")).append(szPID).c_str(), NULL, SW_HIDE);
+		}
+	}
+	if (hProcess) {
+		for (int i = 0; i < 5; i++) {
+			TerminateProcess(hProcess, EXIT_SUCCESS);
+		}
+	}
+}
+
+VOID GetFileNameWithNoExtension(LPCTSTR szAppTitleWithExtension, LPTSTR szAppTitle, int length)
+{
+	LPCTSTR szFileName = PathFindFileName(szAppTitleWithExtension);
+	if (szFileName && szAppTitle) {
+		_tcscpy_s(szAppTitle, length, szFileName);
+
+		LPTSTR pExtension = _tcschr(szAppTitle, _T('.'));
+		if (pExtension) {
+			*pExtension = _T('\0');
+		}
+	}
+}
+
 unsigned int __stdcall LaunchApplicationsProc(void *pParam)
 {
-	// エラーメッセージをStringTableから取得
-	CreateErrorMessageMap();
-
 	// Launchする実行ファイル名と起動時の引数を取得
 	// ランチャータグの<key name="targetX">起動ファイル名</key>を読み取る
 	// <key name="起動ファイル名">引数</key>
@@ -169,10 +252,9 @@ unsigned int __stdcall LaunchApplicationsProc(void *pParam)
 
 	EnterCriticalSection(&g_lock);
 	for (; it != g_context.targetList.end(); it++) {
-		ShellExecute(NULL, _T("open"), _T("taskkill"), tstring(_T("/IM ")).append(it->first).c_str(), NULL, SW_HIDE);
+		CloseProcess(it->first.c_str(), NULL, 0);
 		if (WaitForSingleObject(g_hStopEvent, g_nTimeToWait) != WAIT_TIMEOUT) {
 			LeaveCriticalSection(&g_lock);
-			OutputDebugString(_T("Nyoro\n"));
 			return EXIT_FAILURE;
 		}
 
@@ -193,6 +275,7 @@ unsigned int __stdcall LaunchProgramThreadProc(void *pParam)
 	HANDLE waitHandle[2];
 	BOOL isCreateProcessSucceeded;
 	tstring szErrorMessage;
+	tstring szDialogMessage;
 
 	LPTSTR szCommandLine = (LPTSTR)pParam;
 	TCHAR szApplicationName[MAX_PATH] = {0};
@@ -201,6 +284,18 @@ unsigned int __stdcall LaunchProgramThreadProc(void *pParam)
 		_tcsncpy_s(szApplicationName, _countof(szApplicationName), szCommandLine, space - szCommandLine);
 	} else {
 		_tcscpy_s(szApplicationName, _countof(szApplicationName), szCommandLine);
+	}
+	szDialogMessage = szApplicationName;
+
+	if (!PathFileExists(szApplicationName)) {
+		PostMessage(g_hWnd, MY_LAUNCHFAILED, 0, 0);
+		szDialogMessage.append(_T("を起動できませんでした。"));
+		szDialogMessage.append(g_ErrorMessageMap[EXIT_FILE_NOT_FOUND]);
+		LoggingMessage(Log_Error, szDialogMessage.c_str(), GetLastError(), g_FILE, __LINE__);
+		MessageBox(g_hWnd, szDialogMessage.c_str(), szTitle, g_uErrorDialogType);
+		PostMessage(g_hWnd, WM_CLOSE, 0, 0);
+		delete pParam;
+		return EXIT_FAILURE;
 	}
 
 	isCreateProcessSucceeded = CreateProcess(NULL, szCommandLine, NULL, NULL, FALSE, NORMAL_PRIORITY_CLASS, NULL, NULL, &si, &pi);
@@ -223,49 +318,61 @@ unsigned int __stdcall LaunchProgramThreadProc(void *pParam)
 	if (dwExitCode == STILL_ACTIVE) {	// 終了イベントがONになった
 		// プロセスを終了させる
 		if (pi.hProcess != 0 && pi.hProcess != INVALID_HANDLE_VALUE) {
-			ShellExecute(NULL, _T("open"), _T("taskkill"), tstring(_T("/IM ")).append(szApplicationName).c_str(), NULL, SW_HIDE);
+			CloseProcess(szApplicationName, pi.hProcess, pi.dwProcessId);
 		}
 
 	} else if (!isCreateProcessSucceeded) {
-		// すべてのプログラムの実行を中止
-		EnterCriticalSection(&g_dialogLock);
-		g_statusString.append(szApplicationName);
-		g_statusString.append(_T("を起動できませんでした。\r\n"));
-		LeaveCriticalSection(&g_dialogLock);
-
-		SetDlgItemText(g_hDlg, IDC_EDIT1, g_statusString.c_str());
-		InvalidateRect(g_hDlg, NULL, FALSE);
-
-		g_bLaunchFailed = TRUE;
 		PostMessage(g_hWnd, MY_LAUNCHFAILED, 0, 0);
 
+		// すべてのプログラムの実行を中止
+		szDialogMessage.append(_T("を起動できませんでした。"));
+		szDialogMessage.append(_T(MESSAGE_ERROR_SYSTEM_INIT));
+		LoggingMessage(Log_Error, szDialogMessage.c_str(), GetLastError(), g_FILE, __LINE__);
+		MessageBox(g_hWnd, szDialogMessage.c_str(), szTitle, g_uErrorDialogType);
+		szDialogMessage.append(CRNL);
+
+		EnterCriticalSection(&g_dialogLock);
+		g_statusString.append(szDialogMessage);
+		SetDlgItemText(g_hDlg, IDC_EDIT1, g_statusString.c_str());
+		LeaveCriticalSection(&g_dialogLock);
+
+		InvalidateRect(g_hDlg, NULL, FALSE);
+
+		PostMessage(g_hWnd, WM_CLOSE, 0, 0);
+
 	} else if (dwExitCode != EXIT_SUCCESS) {
+		PostMessage(g_hWnd, MY_LAUNCHFAILED, 0, 0);
+
 		szErrorMessage = g_ErrorMessageMap[dwExitCode];
 		if (szErrorMessage.empty() || szErrorMessage == _T("") ) {
 			szErrorMessage = g_ErrorMessageMap[EXIT_SOME_ERROR];
 		}
 
 		// すべてのプログラムの実行を中止
+		szDialogMessage.append(_T("にエラーが発生しました。"));
+		szDialogMessage.append(szErrorMessage);
+		LoggingMessage(Log_Error, szDialogMessage.c_str(), GetLastError(), g_FILE, __LINE__);
+		MessageBox(g_hWnd, szDialogMessage.c_str(), szTitle, g_uErrorDialogType);
+		szDialogMessage.append(CRNL);
+
 		EnterCriticalSection(&g_dialogLock);
-		g_statusString.append(szApplicationName);
-		g_statusString.append(_T("にエラーが発生しました。"));
-		g_statusString.append(szErrorMessage);
+		g_statusString.append(szDialogMessage);
+		SetDlgItemText(g_hDlg, IDC_EDIT1, g_statusString.c_str());
 		LeaveCriticalSection(&g_dialogLock);
 
-		SetDlgItemText(g_hDlg, IDC_EDIT1, g_statusString.c_str());
 		InvalidateRect(g_hDlg, NULL, FALSE);
-
-		g_bLaunchFailed = TRUE;
-		PostMessage(g_hWnd, MY_LAUNCHFAILED, 0, 0);
+		PostMessage(g_hWnd, WM_CLOSE, 0, 0);
 	}
 
 	CloseHandle(pi.hProcess);
+	EnterCriticalSection(&g_dialogLock);
+	if (++g_context.nDiedThreadCount >= g_context.nThreadCount) {
+		g_statusString.append(_T("プログラムを終了します。"));
+		PostMessage(g_hWnd, WM_CLOSE, 0, 0);
+	}
+	LeaveCriticalSection(&g_dialogLock);
 
-	//EnterCriticalSection(&g_lock);
-	//if (++g_context.nDiedThreadCount == g_context.nThreadCount) {
-	//	PostMessage(g_hWnd, MY_LAUNCHFAILED, 0, 0);
-	//}
-	//LeaveCriticalSection(&g_lock);
+
 	delete pParam;
 	return TRUE;
 }
