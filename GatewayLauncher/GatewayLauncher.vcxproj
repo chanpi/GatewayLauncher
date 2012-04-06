@@ -81,6 +81,7 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <None Include="GatewayLauncher.ico" />
+    <None Include="hamster.bmp" />
     <None Include="ReadMe.txt" />
     <None Include="small.ico" />
   </ItemGroup>

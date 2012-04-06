@@ -35,6 +35,8 @@ INT_PTR CALLBACK	About(HWND, UINT, WPARAM, LPARAM);
 
 // ログダイアログ用の関数
 LRESULT CALLBACK DlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam);
+// スプラッシュダイアログ用の関数
+LRESULT CALLBACK DlgProc2(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam);
 
 // 引数で与えられたプログラムを実行し、終了まで監視します。
 
@@ -271,7 +273,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 	switch (message)
 	{
 	case WM_CREATE:
-		g_hDlg = CreateDialog(hInst, MAKEINTRESOURCE(IDD_DIALOG1), hWnd, (DLGPROC)DlgProc);
+		g_hDlg = CreateDialog(hInst, MAKEINTRESOURCE(IDD_DIALOG2), hWnd, (DLGPROC)DlgProc);
 		if (!g_noDialog) {
 			ShowWindow(g_hDlg, SW_SHOW);
 		}
@@ -330,7 +332,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 		switch (lParam) {
 		case WM_LBUTTONDBLCLK:
 			if (g_hDlg == NULL) {
-				g_hDlg = CreateDialog(hInst, MAKEINTRESOURCE(IDD_DIALOG1), hWnd, (DLGPROC)DlgProc);
+				g_hDlg = CreateDialog(hInst, MAKEINTRESOURCE(IDD_DIALOG2), hWnd, (DLGPROC)DlgProc);
 			}
 			ShowWindow(g_hDlg, SW_SHOW);
 			SetForegroundWindow(g_hDlg);
@@ -429,6 +431,56 @@ LRESULT CALLBACK DlgProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam)
 	}
 	return (LRESULT)FALSE;
 }
+
+LRESULT CALLBACK DlgProc2(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam)
+{
+	UNREFERENCED_PARAMETER(lParam);
+	HICON hIcon;
+
+	switch (message)
+	{
+	case WM_INITDIALOG:
+		hIcon = (HICON)LoadImage(hInst,
+			MAKEINTRESOURCE(IDI_SMALL),
+            IMAGE_ICON,
+            GetSystemMetrics(SM_CXSMICON),
+            GetSystemMetrics(SM_CYSMICON),
+            0);
+		SendMessage(hDlg, WM_SETICON, ICON_SMALL, (LPARAM)hIcon);
+		SetForegroundWindow(hDlg);
+		return (LRESULT)TRUE;
+
+	case WM_COMMAND:
+		switch (LOWORD(wParam)) {
+		case IDOK:
+			// タスクトレイへ
+			break;
+
+		case IDCANCEL:
+			EndDialog(hDlg, LOWORD(wParam));
+			g_hDlg = NULL;
+			break;
+
+		case IDM_ABOUT:
+			DialogBox(hInst, MAKEINTRESOURCE(IDD_ABOUTBOX), hDlg, About);
+			break;
+
+		case IDM_EXIT:
+			PostMessage(hDlg, WM_CLOSE, 0, 0);
+			break;
+		}
+		return (LRESULT)TRUE;
+
+	case WM_CLOSE:
+	case WM_DESTROY:
+		EndDialog(hDlg, LOWORD(wParam));
+		g_hDlg = NULL;
+		PostMessage(g_hWnd, WM_CLOSE, 0, 0);
+		return (LRESULT)TRUE;
+	}
+	return (LRESULT)FALSE;
+}
+
 
 // バージョン情報ボックスのメッセージ ハンドラーです。
 INT_PTR CALLBACK About(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam)
